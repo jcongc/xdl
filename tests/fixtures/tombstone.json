@@ -1,0 +1,9 @@
+{
+  "__typename": "TweetTombstone",
+  "tombstone": {
+    "text": {
+      "text": "This Post is from a suspended account. Learn more",
+      "entities": []
+    }
+  }
+}
