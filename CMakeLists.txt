@@ -39,6 +39,11 @@ target_link_libraries(xdl_core
 add_executable(xdl app/main.cpp)
 target_link_libraries(xdl PRIVATE xdl_core)
 
+# `cmake --install build/release --prefix ~/.local` puts the binary on PATH.
+# Only the executable is installed; xdl_core is an implementation detail.
+include(GNUInstallDirs)
+install(TARGETS xdl RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
 if(XDL_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)

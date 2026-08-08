@@ -6,6 +6,10 @@ FetchContent_Declare(
   GIT_TAG        v1.15.2
 )
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+# GoogleTest ships its own install rules; without this, `cmake --install`
+# scatters gtest/gmock headers, static libs and pkg-config files across the
+# install prefix alongside our one binary.
+set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
 
 add_executable(xdl_tests
