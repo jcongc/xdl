@@ -1,20 +1,44 @@
 # xdl
 
-Download videos and animated GIFs from Twitter/X posts.
+Download videos and animated GIFs from Twitter/X posts — a C++23 library and a
+command-line tool built on it.
 
 `xdl` resolves a post's media through Twitter's public embed endpoint, picks the
 highest-bitrate MP4 available, and optionally re-encodes it to a real `.gif`
-using a two-pass palette. It takes URLs, bare status ids, or a list on stdin,
-and fetches them in parallel.
+using a two-pass palette.
 
 ```console
 $ xdl https://x.com/NASA/status/1491475671058681863?s=20
 [ok]   ~/Downloads/1491475671058681863.mp4  (17509 KiB)
-
-$ xdl --gif --start 3 --duration 5 --width 320 https://x.com/user/status/123
-[ok]   ~/Downloads/123.gif  (573 KiB)
-[ok]   ~/Downloads/123.mp4  (199 KiB)
 ```
+
+```cpp
+xdl::CurlHttpClient http;
+xdl::SyndicationSource source{http};
+
+auto id    = xdl::extract_tweet_id("https://x.com/NASA/status/1491475671058681863?s=20");
+auto media = source.fetch(*id, std::chrono::seconds{30});
+
+for (const auto& item : *media) {
+  std::println("{} {}", xdl::to_string(item.kind), item.url);
+}
+```
+
+## Contents
+
+- [Features](#features)
+- [Requirements](#requirements)
+- [Install](#install)
+- [Command-line usage](#command-line-usage)
+- [Library usage](#library-usage)
+  - [Adding it to a project](#adding-it-to-a-project)
+  - [Core types](#core-types)
+  - [Resolving media](#resolving-media)
+  - [Downloading and converting](#downloading-and-converting)
+  - [Substituting your own I/O](#substituting-your-own-io)
+  - [API reference](#api-reference)
+- [Development](#development)
+- [Known limitations](#known-limitations)
 
 ## Features
 
@@ -29,8 +53,8 @@ $ xdl --gif --start 3 --duration 5 --width 320 https://x.com/user/status/123
   post collapse to a single download.
 - **Two backends.** The public syndication endpoint by default, with a `yt-dlp`
   fallback for posts it cannot serve.
-- **Resumable-safe writes.** Downloads land in a `.part` file and are renamed on
-  success, so an interrupted run never leaves a truncated file behind.
+- **Embeddable.** Every layer is a library API; the CLI is a thin wrapper. All
+  I/O sits behind interfaces you can replace.
 
 ## Requirements
 
@@ -55,7 +79,7 @@ cmake --build --preset release
 cmake --install build/release --prefix ~/.local   # puts xdl on your PATH
 ```
 
-## Usage
+## Command-line usage
 
 ```
 xdl [URL|ID|-]... [options]
@@ -83,34 +107,235 @@ from stdin. Blank lines and `#` comments are ignored.
 Files are named `<status_id>.mp4` / `.gif`, or `<status_id>_<n>` when a post
 carries several media items.
 
-### Converting videos
-
 `--gif` on a full-length video produces an enormous file — a three-minute clip
 is not a reasonable GIF. `xdl` warns above 30 seconds; use `--start` and
-`--duration` to take the part you want, and lower `--fps` or `--width` to
-control size.
+`--duration` to take the part you want:
 
 ```sh
 xdl --gif --start 12 --duration 4 --fps 12 --width 400 https://x.com/user/status/123
 ```
 
-### Backends
+Exit status is `0` when every post was processed, `1` when at least one failed,
+and `2` for invalid arguments or no input.
 
-| Backend | Mechanism |
+## Library usage
+
+All functionality lives in the `xdl_core` target. `app/main.cpp` is only
+argument parsing and wiring, so anything the CLI does is reachable from code.
+
+### Adding it to a project
+
+The library is not yet published as an installable CMake package. Consume it as
+a subdirectory, turning off its test suite so your build does not pull in
+GoogleTest:
+
+```cmake
+set(XDL_BUILD_TESTS OFF)
+add_subdirectory(third_party/xdl-cpp)
+
+target_link_libraries(your_app PRIVATE xdl_core)
+```
+
+Or with `FetchContent`:
+
+```cmake
+include(FetchContent)
+FetchContent_Declare(xdl
+  GIT_REPOSITORY https://github.com/jcongc/xdl-cpp.git
+  GIT_TAG        main)
+set(XDL_BUILD_TESTS OFF)
+FetchContent_MakeAvailable(xdl)
+
+target_link_libraries(your_app PRIVATE xdl_core)
+```
+
+`xdl_core` propagates its include directory and link requirements, so no further
+configuration is needed. Compiling by hand works too:
+
+```sh
+c++ -std=c++23 -Ixdl-cpp/include app.cpp xdl-cpp/build/release/libxdl_core.a \
+    $(pkg-config --cflags --libs simdjson) -lcurl -o app
+```
+
+### Core types
+
+Errors are values rather than exceptions — every fallible call says so in its
+signature, and nothing unwinds across a thread boundary.
+
+```cpp
+#include <xdl/error.hpp>
+#include <xdl/media.hpp>
+
+struct xdl::Error {
+  enum class Kind { BadInput, Network, Unavailable, NoMedia, Subprocess, Io };
+  Kind kind;
+  std::string message;
+};
+
+template <class T> using xdl::Result = std::expected<T, xdl::Error>;
+
+enum class xdl::MediaKind { Gif, Video };
+
+struct xdl::Media {
+  std::string url;
+  MediaKind   kind;
+  int         duration_ms;
+};
+```
+
+### Resolving media
+
+`extract_tweet_id` accepts a post URL or a bare id, normalising away tracking
+parameters first. A `MediaSource` turns that id into `Media` records.
+
+```cpp
+#include <xdl/http.hpp>
+#include <xdl/syndication.hpp>
+#include <xdl/url.hpp>
+
+const xdl::CurlGlobal curl_guard;   // once per process, before any threads
+xdl::CurlHttpClient http;           // safe to share; uses a handle per thread
+xdl::SyndicationSource source{http};
+
+auto id = xdl::extract_tweet_id("https://x.com/NASA/status/1491475671058681863?s=20");
+if (!id) {
+  std::println(stderr, "bad url: {}", id.error().message);
+  return 1;
+}
+
+auto media = source.fetch(*id, std::chrono::seconds{30});
+if (!media) {
+  std::println(stderr, "fetch failed: {}", media.error().message);
+  return 1;
+}
+
+for (const auto& item : *media) {
+  std::println("{} {} ({} ms)", xdl::to_string(item.kind), item.url, item.duration_ms);
+}
+```
+
+To try several backends in order, hand them to `resolve_media`, which reports
+every failure together if all of them fail:
+
+```cpp
+#include <xdl/backend.hpp>
+#include <xdl/ytdlp.hpp>
+
+xdl::PosixProcessRunner runner;
+xdl::YtDlpSource fallback{runner};
+
+xdl::MediaSource* sources[] = {&source, &fallback};
+auto media = xdl::resolve_media(sources, *id, xdl::OnlyFilter::All,
+                                std::chrono::seconds{30});
+```
+
+### Downloading and converting
+
+`Downloader` is the whole pipeline: resolve, download, optionally convert. It
+takes an `Options` whose defaults match the CLI's.
+
+```cpp
+#include <xdl/downloader.hpp>
+
+xdl::Options options;
+options.outdir   = "/tmp/clips";
+options.make_gif = true;
+options.duration = 4.0;          // seconds; omit for the whole clip
+options.jobs     = 8;
+
+xdl::CurlHttpClient http;
+xdl::PosixProcessRunner runner;
+xdl::Downloader downloader{http, runner, options};
+
+// process_one for a single post...
+const xdl::SourceResult one = downloader.process_one("https://x.com/user/status/123");
+
+// ...or run for a batch, fanned out across options.jobs workers.
+// Results come back in input order regardless of completion order.
+const std::vector<xdl::SourceResult> many = downloader.run(sources);
+
+for (const auto& result : many) {
+  if (result.error) {
+    std::println(stderr, "{}: {}", result.source, result.error->message);
+  }
+  for (const auto& note : result.notes) std::println(stderr, "warning: {}", note);
+  for (const auto& file : result.files) std::println("{}", file.string());
+}
+```
+
+Use `collect_sources` to apply the CLI's input handling — normalise, drop blanks
+and `#` comments, and deduplicate while preserving order:
+
+```cpp
+const auto sources = xdl::collect_sources(raw_lines);
+```
+
+### Substituting your own I/O
+
+Everything that reaches the outside world goes through two interfaces. Replace
+either to add caching, retries, request logging, or a mock for your own tests.
+
+```cpp
+class HttpClient {
+ public:
+  virtual Result<HttpResponse> get(std::string_view url, const Headers&,
+                                   std::chrono::milliseconds timeout) = 0;
+  virtual Result<void> download(std::string_view url,
+                                const std::filesystem::path& dest,
+                                std::chrono::milliseconds timeout) = 0;
+};
+
+class ProcessRunner {
+ public:
+  virtual Result<ProcessResult> run(std::span<const std::string> argv,
+                                    std::chrono::milliseconds timeout) = 0;
+};
+```
+
+A stub client is enough to drive the pipeline with no network at all — the same
+approach the test suite uses:
+
+```cpp
+class StubHttp final : public xdl::HttpClient {
+ public:
+  xdl::Result<xdl::HttpResponse> get(std::string_view, const xdl::Headers&,
+                                     std::chrono::milliseconds) override {
+    return xdl::HttpResponse{200, my_canned_payload};
+  }
+  xdl::Result<void> download(std::string_view, const std::filesystem::path&,
+                             std::chrono::milliseconds) override {
+    return {};
+  }
+};
+
+StubHttp http;
+xdl::SyndicationSource source{http};
+auto media = source.fetch("123", std::chrono::seconds{5});
+```
+
+### API reference
+
+| Header | Provides |
 | --- | --- |
-| `syndication` | Twitter's public `cdn.syndication.twimg.com` embed endpoint. No authentication or API key. |
-| `yt-dlp` | Shells out to `yt-dlp --dump-single-json`. Slower, but more robust when Twitter changes its payloads. |
+| `xdl/error.hpp` | `Error`, `Error::Kind`, `Result<T>`, `fail()` |
+| `xdl/media.hpp` | `Media`, `MediaKind`, `to_string` |
+| `xdl/options.hpp` | `Options`, `OnlyFilter`, `BackendChoice` |
+| `xdl/url.hpp` | `normalize_url`, `extract_tweet_id` |
+| `xdl/token.hpp` | `syndication_token` |
+| `xdl/http.hpp` | `HttpClient`, `CurlHttpClient`, `CurlGlobal`, `Headers`, `HttpResponse` |
+| `xdl/process.hpp` | `ProcessRunner`, `PosixProcessRunner`, `ProcessResult`, `program_exists` |
+| `xdl/backend.hpp` | `MediaSource`, `resolve_media`, `filter_media` |
+| `xdl/syndication.hpp` | `SyndicationSource`, `parse_syndication_payload`, `build_syndication_url` |
+| `xdl/ytdlp.hpp` | `YtDlpSource`, `parse_ytdlp_payload` |
+| `xdl/ffmpeg.hpp` | `GifSpec`, `encode_gif`, `build_palettegen_argv`, `build_paletteuse_argv` |
+| `xdl/thread_pool.hpp` | `ThreadPool` |
+| `xdl/downloader.hpp` | `Downloader`, `SourceResult`, `collect_sources` |
+| `xdl/cli.hpp` | `parse_args`, `usage`, `read_sources_file`, `read_sources_stdin` |
 
-`auto` tries syndication first and falls back to yt-dlp. Failures from every
-attempted backend are reported together.
-
-## Exit status
-
-| Code | Meaning |
-| --- | --- |
-| `0` | All posts processed |
-| `1` | At least one post failed |
-| `2` | Invalid arguments, or no input given |
+**Threading.** Construct one `CurlGlobal` per process before starting threads;
+`curl_global_init` is not thread-safe. `CurlHttpClient` is then safe to share
+across threads — it borrows a `thread_local` easy handle per call, because
+libcurl forbids concurrent use of a single handle.
 
 ## Development
 
@@ -122,13 +347,6 @@ ctest --preset debug
 
 The test suite runs entirely offline, driven by captured payloads in
 `tests/fixtures/` — no network access and no subprocesses.
-
-### Architecture
-
-All logic lives in a static `xdl_core` library; `app/main.cpp` only parses
-arguments and wires up implementations. Everything that touches the outside
-world goes through two abstract interfaces, `HttpClient` and `ProcessRunner`,
-which the tests replace with fakes.
 
 ```
 include/xdl/   public headers
@@ -154,5 +372,7 @@ Two invariants are worth preserving:
   videos.
 - Only Twitter/X is supported. Protected, deleted, and age-gated posts cannot be
   fetched.
+- `xdl_core` has no install or `find_package` support yet; consume it via
+  `add_subdirectory` or `FetchContent`.
 - A Homebrew-provided simdjson leaves the binary linked against `/opt/homebrew`,
   so it is not portable to machines without it.
