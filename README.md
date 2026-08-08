@@ -99,6 +99,10 @@ tests in `tests/ffmpeg_test.cpp`:
 2. When width is not positive the `scale` filter is omitted entirely, because
    `scale=-1:-1` is not valid.
 
-yt-dlp exposes no `animated_gif` flag, so the fallback backend treats a silent
-stream as a GIF. A genuinely silent video is misfiled as a GIF; this is a known
-limitation inherited from the original tool.
+yt-dlp exposes no `animated_gif` flag, and it reports `acodec` as null for
+Twitter's progressive formats whether or not audio exists — so "no audio codec"
+cannot tell a GIF from a video. The fallback backend classifies on the CDN path
+instead: `/tweet_video/` is an animated GIF, `/amplify_video/` and
+`/ext_tw_video/` are videos. An explicit `acodec` of `none` is still honoured,
+and anything inconclusive is treated as a video, since the reverse once made
+`--only gif` download multi-megabyte videos.

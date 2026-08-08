@@ -70,12 +70,23 @@ Result<void> collect_entry(simdjson::ondemand::object entry, std::vector<Media>&
     return {};
   }
 
-  // yt-dlp does not expose Twitter's animated_gif flag. A silent stream is the
-  // best signal available, so a genuinely silent video is misfiled as a GIF.
-  bool silent = true;
-  std::string_view acodec;
-  if (entry["acodec"].get_string().get(acodec) == simdjson::SUCCESS) {
-    silent = (acodec == "none");
+  // yt-dlp does not expose Twitter's animated_gif flag, and it reports acodec
+  // as null for progressive Twitter formats whether or not there is audio — so
+  // "no audio codec" cannot distinguish the two kinds and would classify every
+  // video as a GIF.
+  //
+  // The CDN path is the dependable signal: animated GIFs are served from
+  // /tweet_video/, while real videos come from /amplify_video/ or
+  // /ext_tw_video/.
+  bool is_gif = best.url.find("/tweet_video/") != std::string::npos;
+
+  // An explicit acodec of "none" is still trusted when yt-dlp provides one.
+  if (!is_gif) {
+    std::string_view acodec;
+    if (entry["acodec"].get_string().get(acodec) == simdjson::SUCCESS &&
+        acodec == "none") {
+      is_gif = true;
+    }
   }
 
   double duration_s = 0.0;
@@ -84,7 +95,7 @@ Result<void> collect_entry(simdjson::ondemand::object entry, std::vector<Media>&
   }
 
   out.push_back(Media{std::move(best.url),
-                      silent ? MediaKind::Gif : MediaKind::Video,
+                      is_gif ? MediaKind::Gif : MediaKind::Video,
                       static_cast<int>(duration_s * 1000.0)});
   return {};
 }

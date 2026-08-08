@@ -16,12 +16,56 @@ using xdl::testing::FakeProcessRunner;
 using xdl::testing::load_fixture;
 
 // Real capture from `yt-dlp --dump-single-json` against the NASA video tweet.
+// Regression: yt-dlp reports acodec as null here, so the old "no audio codec
+// means silent means GIF" rule classified this — and every other real video
+// reaching the fallback — as a GIF, which made --only gif download videos.
 TEST(YtDlpPayload, ParsesRealDump) {
   auto media = parse_ytdlp_payload(load_fixture("ytdlp_video.json"));
   ASSERT_TRUE(media.has_value()) << media.error().message;
   ASSERT_FALSE(media->empty());
   EXPECT_TRUE((*media)[0].url.starts_with("https://"));
   EXPECT_GT((*media)[0].duration_ms, 0);
+  EXPECT_EQ((*media)[0].kind, MediaKind::Video)
+      << "a real video must not be classified as a GIF";
+}
+
+// Twitter serves animated GIFs from a distinct CDN path, which is the only
+// dependable signal since acodec is null for both kinds.
+TEST(YtDlpPayload, ClassifiesTweetVideoPathsAsGif) {
+  const std::string json = R"({
+    "formats": [{"url": "https://video.twimg.com/tweet_video/ClwOxLQ.mp4",
+                 "protocol": "https", "vcodec": "avc1", "tbr": 1.0}]
+  })";
+  auto media = parse_ytdlp_payload(json);
+  ASSERT_TRUE(media.has_value());
+  ASSERT_EQ(media->size(), 1u);
+  EXPECT_EQ((*media)[0].kind, MediaKind::Gif);
+}
+
+TEST(YtDlpPayload, ClassifiesAmplifyAndExtVideoPathsAsVideo) {
+  for (const auto* url : {"https://video.twimg.com/amplify_video/1/vid/a.mp4",
+                          "https://video.twimg.com/ext_tw_video/1/pu/vid/a.mp4"}) {
+    const std::string json = std::string{R"({"formats": [{"url": ")"} + url +
+                             R"(", "protocol": "https", "vcodec": "avc1", "tbr": 1.0}]})";
+    auto media = parse_ytdlp_payload(json);
+    ASSERT_TRUE(media.has_value()) << url;
+    ASSERT_EQ(media->size(), 1u) << url;
+    EXPECT_EQ((*media)[0].kind, MediaKind::Video) << url;
+  }
+}
+
+// With no usable signal at all, video is the safer assumption: mislabelling a
+// GIF as a video only affects --only filtering, whereas the reverse made
+// --only gif download multi-megabyte videos.
+TEST(YtDlpPayload, DefaultsToVideoWhenAudioIsUnknown) {
+  const std::string json = R"({
+    "formats": [{"url": "https://cdn/unknown.mp4", "protocol": "https",
+                 "vcodec": "avc1", "tbr": 1.0}]
+  })";
+  auto media = parse_ytdlp_payload(json);
+  ASSERT_TRUE(media.has_value());
+  ASSERT_EQ(media->size(), 1u);
+  EXPECT_EQ((*media)[0].kind, MediaKind::Video);
 }
 
 TEST(YtDlpPayload, PrefersHighestBitrateProgressiveFormat) {
