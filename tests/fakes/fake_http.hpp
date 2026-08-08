@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -35,8 +36,11 @@ class FakeHttpClient final : public HttpClient {
   // Bytes written by download(); lets tests assert on file size.
   void set_payload(std::string payload) { payload_ = std::move(payload); }
 
+  // Downloader::run drives this from several pool workers at once, so the
+  // recording vectors need the same protection any shared state would.
   Result<HttpResponse> get(std::string_view url, const Headers&,
                            std::chrono::milliseconds) override {
+    std::lock_guard<std::mutex> lock(mutex_);
     requested_urls.emplace_back(url);
     for (const auto& [needle, canned] : gets_) {
       if (url.find(needle) != std::string_view::npos) {
@@ -52,9 +56,14 @@ class FakeHttpClient final : public HttpClient {
 
   Result<void> download(std::string_view url, const std::filesystem::path& dest,
                         std::chrono::milliseconds) override {
-    downloaded.emplace_back(url, dest);
-    if (download_error_) {
-      return std::unexpected(*download_error_);
+    std::optional<Error> failure;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      downloaded.emplace_back(url, dest);
+      failure = download_error_;
+    }
+    if (failure) {
+      return std::unexpected(*failure);
     }
     std::error_code ec;
     std::filesystem::create_directories(dest.parent_path(), ec);
@@ -70,6 +79,7 @@ class FakeHttpClient final : public HttpClient {
   std::vector<std::pair<std::string, std::filesystem::path>> downloaded;
 
  private:
+  mutable std::mutex mutex_;
   std::vector<std::pair<std::string, Canned>> gets_;
   std::optional<Error> download_error_;
   std::string payload_{"fake-mp4-bytes"};

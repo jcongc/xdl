@@ -49,7 +49,31 @@ class FileHandle {
   std::FILE* file_{nullptr};
 };
 
-CURL* as_curl(void* handle) { return static_cast<CURL*>(handle); }
+// libcurl allows an easy handle to be used from any thread, but never from two
+// at once. Giving each thread its own handle keeps the pool workers
+// independent without serialising them behind a mutex. The handle is cleaned
+// up when the owning thread exits.
+class EasyHandle {
+ public:
+  EasyHandle() : handle_(curl_easy_init()) {}
+  ~EasyHandle() {
+    if (handle_ != nullptr) {
+      curl_easy_cleanup(handle_);
+    }
+  }
+  EasyHandle(const EasyHandle&) = delete;
+  EasyHandle& operator=(const EasyHandle&) = delete;
+
+  CURL* get() const { return handle_; }
+
+ private:
+  CURL* handle_{nullptr};
+};
+
+CURL* thread_handle() {
+  thread_local EasyHandle handle;
+  return handle.get();
+}
 
 void apply_common_options(CURL* curl, std::string_view url,
                           std::chrono::milliseconds timeout) {
@@ -70,22 +94,13 @@ void apply_common_options(CURL* curl, std::string_view url,
 CurlGlobal::CurlGlobal() { curl_global_init(CURL_GLOBAL_DEFAULT); }
 CurlGlobal::~CurlGlobal() { curl_global_cleanup(); }
 
-CurlHttpClient::CurlHttpClient() : handle_(curl_easy_init()) {}
-
-CurlHttpClient::~CurlHttpClient() {
-  if (handle_ != nullptr) {
-    curl_easy_cleanup(as_curl(handle_));
-  }
-}
-
 Result<HttpResponse> CurlHttpClient::get(std::string_view url,
                                          const Headers& headers,
                                          std::chrono::milliseconds timeout) {
-  if (handle_ == nullptr) {
+  CURL* curl = thread_handle();
+  if (curl == nullptr) {
     return fail(Error::Kind::Network, "curl handle unavailable");
   }
-
-  CURL* curl = as_curl(handle_);
   curl_easy_reset(curl);
   apply_common_options(curl, url, timeout);
 
@@ -117,7 +132,8 @@ Result<HttpResponse> CurlHttpClient::get(std::string_view url,
 Result<void> CurlHttpClient::download(std::string_view url,
                                       const std::filesystem::path& dest,
                                       std::chrono::milliseconds timeout) {
-  if (handle_ == nullptr) {
+  CURL* curl = thread_handle();
+  if (curl == nullptr) {
     return fail(Error::Kind::Network, "curl handle unavailable");
   }
 
@@ -132,7 +148,6 @@ Result<void> CurlHttpClient::download(std::string_view url,
     return fail(Error::Kind::Io, "cannot open " + partial.string());
   }
 
-  CURL* curl = as_curl(handle_);
   curl_easy_reset(curl);
   apply_common_options(curl, url, timeout);
   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, append_to_file);

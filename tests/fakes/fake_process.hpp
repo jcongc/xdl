@@ -1,6 +1,7 @@
 #pragma once
 
 #include <map>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <utility>
@@ -17,8 +18,10 @@ class FakeProcessRunner final : public ProcessRunner {
   void push_result(ProcessResult result) { queued_.push_back(std::move(result)); }
   void push_error(Error error) { errors_[queued_.size()] = std::move(error); }
 
+  // Also driven concurrently by Downloader::run.
   Result<ProcessResult> run(std::span<const std::string> argv,
                             std::chrono::milliseconds) override {
+    std::lock_guard<std::mutex> lock(mutex_);
     calls.emplace_back(argv.begin(), argv.end());
     const size_t index = calls.size() - 1;
 
@@ -34,6 +37,7 @@ class FakeProcessRunner final : public ProcessRunner {
   std::vector<std::vector<std::string>> calls;
 
  private:
+  mutable std::mutex mutex_;
   std::vector<ProcessResult> queued_;
   std::map<size_t, Error> errors_;
 };

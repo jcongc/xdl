@@ -48,14 +48,13 @@ class CurlGlobal {
   CurlGlobal& operator=(CurlGlobal&&) = delete;
 };
 
-// Owns one CURL* easy handle. Handles are never shared between threads, so
-// each worker constructs its own client.
+// Safe to share across threads: libcurl forbids using one easy handle from
+// more than one thread at a time, so this type holds no handle of its own and
+// instead borrows a thread-local one per call. A single instance can therefore
+// be handed to every worker in the pool.
 class CurlHttpClient final : public HttpClient {
  public:
-  CurlHttpClient();
-  ~CurlHttpClient() override;
-  CurlHttpClient(const CurlHttpClient&) = delete;
-  CurlHttpClient& operator=(const CurlHttpClient&) = delete;
+  CurlHttpClient() = default;
 
   Result<HttpResponse> get(std::string_view url,
                            const Headers& headers,
@@ -64,9 +63,6 @@ class CurlHttpClient final : public HttpClient {
   Result<void> download(std::string_view url,
                         const std::filesystem::path& dest,
                         std::chrono::milliseconds timeout) override;
-
- private:
-  void* handle_{nullptr};  // CURL*, opaque here to keep curl out of the header
 };
 
 // The User-Agent the syndication endpoint expects to see.

@@ -249,6 +249,38 @@ TEST_F(DownloaderTest, BatchRunPreservesInputOrderAndSurvivesFailures) {
   EXPECT_FALSE(results[2].error.has_value());
 }
 
+// Regression: main once shared a single CurlHttpClient — and therefore a
+// single CURL* easy handle — across every pool worker. libcurl forbids
+// concurrent use of one easy handle, and the result was an intermittent
+// SIGABRT that only appeared with several sources and -j > 1. This drives many
+// distinct tweets through a real ThreadPool so the sanitiser builds have
+// something to catch if shared state creeps back in.
+TEST_F(DownloaderTest, HandlesManySourcesConcurrentlyWithoutRaces) {
+  serve_json(R"({"mediaDetails": [{"type": "video", "video_info": {
+    "duration_millis": 1000,
+    "variants": [{"content_type": "video/mp4", "bitrate": 1, "url": "https://cdn/a.mp4"}]}}]})");
+  options_.jobs = 8;
+  Downloader downloader{http_, runner_, options_};
+
+  std::vector<std::string> sources;
+  for (int i = 0; i < 64; ++i) {
+    sources.push_back("https://x.com/a/status/" + std::to_string(100000 + i));
+  }
+
+  const auto results = downloader.run(sources);
+
+  ASSERT_EQ(results.size(), 64u);
+  for (size_t i = 0; i < results.size(); ++i) {
+    ASSERT_FALSE(results[i].error.has_value())
+        << "source " << i << ": " << results[i].error->message;
+    ASSERT_EQ(results[i].files.size(), 1u);
+    // Order must survive the fan-out.
+    EXPECT_EQ(results[i].files[0].filename().string(),
+              std::to_string(100000 + i) + ".mp4");
+  }
+  EXPECT_EQ(http_.downloaded.size(), 64u);
+}
+
 TEST(CollectSources, DeduplicatesEquivalentSpellings) {
   const std::vector<std::string> raw{
       "https://x.com/a/status/123?s=20",
