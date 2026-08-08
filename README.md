@@ -72,8 +72,8 @@ Developed against Apple Clang 21 on macOS, where libcurl ships with the SDK.
 brew install simdjson cmake ffmpeg yt-dlp     # macOS
 # apt install libsimdjson-dev cmake libcurl4-openssl-dev ffmpeg  # Debian/Ubuntu
 
-git clone https://github.com/jcongc/xdl-cpp.git
-cd xdl-cpp
+git clone https://github.com/jcongc/xdl.git
+cd xdl
 cmake --preset release
 cmake --build --preset release
 cmake --install build/release --prefix ~/.local   # puts xdl on your PATH
@@ -131,7 +131,7 @@ GoogleTest:
 
 ```cmake
 set(XDL_BUILD_TESTS OFF)
-add_subdirectory(third_party/xdl-cpp)
+add_subdirectory(third_party/xdl)
 
 target_link_libraries(your_app PRIVATE xdl_core)
 ```
@@ -141,7 +141,7 @@ Or with `FetchContent`:
 ```cmake
 include(FetchContent)
 FetchContent_Declare(xdl
-  GIT_REPOSITORY https://github.com/jcongc/xdl-cpp.git
+  GIT_REPOSITORY https://github.com/jcongc/xdl.git
   GIT_TAG        main)
 set(XDL_BUILD_TESTS OFF)
 FetchContent_MakeAvailable(xdl)
@@ -153,7 +153,7 @@ target_link_libraries(your_app PRIVATE xdl_core)
 configuration is needed. Compiling by hand works too:
 
 ```sh
-c++ -std=c++23 -Ixdl-cpp/include app.cpp xdl-cpp/build/release/libxdl_core.a \
+c++ -std=c++23 -Ixdl/include app.cpp xdl/build/release/libxdl_core.a \
     $(pkg-config --cflags --libs simdjson) -lcurl -o app
 ```
 
